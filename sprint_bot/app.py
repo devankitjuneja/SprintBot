@@ -121,6 +121,7 @@ def get_all_tickets():
                 ticket = {
                     "id": ticket_id,
                     "title": ticket_info[0],
+                    "item_no": ticket_info[1],
                     "status": statuses.get(ticket_info[26], "Unknown"),
                     "created_by": user_display_names.get(ticket_info[2], "Unknown"),
                     # assigned_to is now a dict: {user_id: user_display_name, ...}
@@ -187,6 +188,9 @@ async def handle_intent_in_background(user_id, channel, intent_result):
                 assignee_name=intent_result.get("assignee"),
                 user_id=user_id
             )
+        elif intent_result["intent"] == "delete_ticket":
+            ticket_id = intent_result.get("ticket_id")
+            final_message = delete_ticket(ticket_id)
         elif intent_result["intent"] == "bot_capabilities":
             final_message = get_bot_capabilities_message()
         else:
@@ -243,6 +247,13 @@ async def slack_events(request: Request):
             elif intent_result["intent"] == "bot_capabilities":
                 send_slack_message(channel, "ℹ️ Listing my capabilities...")
                 asyncio.create_task(handle_intent_in_background(user_id, channel, intent_result))
+            elif intent_result["intent"] == "delete_ticket":
+                ticket_id = intent_result.get("ticket_id")
+                if not ticket_id:
+                    send_slack_message(channel, "❌ Ticket ID is required to delete a ticket.")
+                else:
+                    send_slack_message(channel, "🗑️ Deleting your ticket...")
+                    asyncio.create_task(handle_intent_in_background(user_id, channel, intent_result))
             else:
                 send_slack_message(channel, "❓ Sorry, I couldn't understand your request. Please rephrase or try another command.")
         else:
@@ -264,11 +275,12 @@ async def intent_router(payload: dict = Body(...)):
     logger.info(f"Detected intent: {intent}")
 
     if intent == "get_my_tickets":
-        # You may want to pass user_id from payload if needed
-        # user_id = payload.get("user_id")
-        # tickets = get_tickets_for_user(user_id) if user_id else get_all_tickets()
         tickets = get_tickets_for_user("28091000000403001")
         return JSONResponse(content=tickets)
+    elif intent and intent.get("intent") == "delete_ticket":
+        ticket_id = intent.get("ticket_id")
+        result = delete_ticket(ticket_id)
+        return JSONResponse(content={"result": result})
     else:
         return JSONResponse(content={"error": "Intent not recognized or not supported."}, status_code=400)
 
@@ -326,6 +338,45 @@ def create_ticket(title, assignee_name=None, user_id=None):
         logger.error(f"Failed to create ticket: {response.text}")
         final_message = "❌ Failed to create the ticket. Please try again."
     return final_message
+
+def delete_ticket(item_no: str) -> str:
+    team_id = "669462816"
+    project_id = "28091000000003109"
+    sprint_id = get_current_sprint()
+    # Get the ticket ID from the item_no
+    ticket_id = get_ticket_id_by_item_no(item_no)
+    if not ticket_id:
+        logger.error(f"Ticket with item_no {item_no} not found.")
+        return f"❌ Ticket with item_no `{item_no}` not found. Please check the ID and try again."
+    url = f"{ZOHO_API_BASE_URL}/team/{team_id}/projects/{project_id}/sprints/{sprint_id}/item/{ticket_id}/"
+    headers = {"Authorization": f"Zoho-oauthtoken {ZOHO_ACCESS_TOKEN}"}
+    response = requests.delete(url, headers=headers)
+    if response.status_code in (200, 204):
+        return f"✅ Ticket `{item_no}` deleted successfully."
+    else:
+        logger.error(f"Failed to delete ticket: {response.text}")
+        return f"❌ Failed to delete ticket `{item_no}`. Please check the ID and try again."
+
+def get_ticket_id_by_item_no(item_no: str) -> str:
+    """
+    Given an item_no (user-facing ticket number), return the internal ticket ID.
+    Returns None if not found.
+    """
+    all_tickets = get_all_tickets()
+    if not all_tickets or "tickets" not in all_tickets:
+        return None
+    # item_no is prefixed with 'I' in Zoho, so we need to match it by removing 'I' if present
+    if item_no.upper().startswith('I'):
+        item_no = item_no[1:]  # Remove 'I' prefix for matching
+    item_no = item_no.strip()  # Clean up any extra spaces
+    if not item_no:
+        logger.error("No item_no provided for ticket search.")
+        return None
+    logger.info(f"Searching for ticket with item_no: {item_no}")
+    for ticket in all_tickets["tickets"]:
+        if str(ticket.get("item_no")) == str(item_no):
+            return ticket.get("id")
+    return None
 
 # Start the FastAPI server
 if __name__ == "__main__":
